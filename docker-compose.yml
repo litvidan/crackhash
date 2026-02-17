@@ -1,0 +1,42 @@
+﻿services:
+  gateway:
+    image: crackhash/gateway
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - worker-1
+      - worker-2
+      - worker-3
+    networks:
+      - crackhash-net
+
+  worker-1:
+    image: crackhash/worker
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    networks:
+      - crackhash-net
+
+  worker-2:
+    image: crackhash/worker
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    networks:
+      - crackhash-net
+
+  worker-3:
+    image: crackhash/worker
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    networks:
+      - crackhash-net
+
+networks:
+  crackhash-net:
+    driver: bridge
