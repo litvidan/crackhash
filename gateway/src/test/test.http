@@ -1,5 +1,4 @@
-﻿### 1. Start a new crack job
-# This request starts the cracking process and immediately returns a requestId. Word zzzzz
+﻿### 1. Crack word 'zzzzz'
 POST http://localhost:8080/graphql
 Content-Type: application/json
 
@@ -7,8 +6,7 @@ Content-Type: application/json
   "query": "mutation { crackHash(hash: \"95ebc3c7b3b9f1d2c40fec14415d3cb8\", maxLength: 5) }"
 }
 
-### 1.1 Start a new crack job
-# This request starts the cracking process and immediately returns a requestId. Word yyyyy
+### 1.1 Crack word 'yyyyy'
 POST http://localhost:8080/graphql
 Content-Type: application/json
 
@@ -16,14 +14,14 @@ Content-Type: application/json
 "query": "mutation { crackHash(hash: \"c5777c091df772ff2b2dffcb43d9794c\", maxLength: 5) }"
 }
 
-### 2. Check the status of the job
+### 2. Check the status of job
 POST http://localhost:8080/graphql
 Content-Type: application/json
 
 {
   "query": "query { hashStatus(requestId: \"cc054fac-6cd3-46ef-acad-a9e737b3a05b\") { status data } }"
 }
-### 2.1 Check the status of job that doesn't exist
+### 2.1 Check the hash status of job that doesn't exist
 POST http://localhost:8080/graphql
 Content-Type: application/json
 

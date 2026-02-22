@@ -3,10 +3,8 @@
 import com.expediagroup.graphql.server.operations.Mutation
 import com.litvidan.grpc.HashCrackerServiceGrpcKt
 import com.litvidan.grpc.Service
-import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import java.math.BigInteger
 import java.util.*
 import java.util.concurrent.TimeUnit
@@ -29,10 +27,10 @@ class CrackHashMutation : Mutation {
         val requestId = UUID.randomUUID().toString()
         println("Received crack request for hash '$hash'. Assigned requestId: $requestId")
 
-        // Initialize request state
+        // Initialize state
         requestStates[requestId] = CrackRequestState(status = RequestStatus.IN_PROGRESS)
 
-        // Launch the background processing coroutine
+        // Launch background processing
         GlobalScope.launch {
             handleCrackRequest(requestId, hash, maxLength, config)
         }
@@ -43,8 +41,9 @@ class CrackHashMutation : Mutation {
     /**
      * Handles the complete lifecycle of a crack request:
      * - Dispatches tasks to workers
-     * - Waits for the first successful result
-     * - Updates the final state (READY or ERROR)
+     * - Waits for all workers to complete (or timeout)
+     * - Collects all found words (handles hash collisions)
+     * - Updates the final state (READY with results or ERROR)
      */
     private suspend fun handleCrackRequest(
         requestId: String,
@@ -55,26 +54,19 @@ class CrackHashMutation : Mutation {
         try {
             withTimeout(config.requestTimeoutMillis) {
                 coroutineScope {
-                    val (resultChannel, workerJobs) = launchWorkers(requestId, hash, maxLength, config)
+                    val results = launchWorkers(requestId, hash, maxLength, config)
 
-                    // Wait for the first successful result
-                    val foundWord = resultChannel.receive()
-                    println("Result received for $requestId! Word: $foundWord. Cancelling other workers.")
-
-                    // Cancel all remaining worker jobs
-                    workerJobs.forEach { it.cancelAndJoin() }
-
-                    // Update state to READY with the found word
+                    // All workers finished, set final READY status with all found words
                     requestStates[requestId] = CrackRequestState(
                         status = RequestStatus.READY,
-                        data = listOf(foundWord)
+                        data = results.ifEmpty { emptyList() }
                     )
-                    println("Request $requestId finished successfully.")
+                    println("Request $requestId finished with ${results.size} result(s).")
                 }
             }
         } catch (e: TimeoutCancellationException) {
             println("Request $requestId timed out.")
-            requestStates[requestId] = CrackRequestState(status = RequestStatus.ERROR)
+            requestStates[requestId] = CrackRequestState(status = RequestStatus.TIMEOUT)
         } catch (e: Exception) {
             println("Request $requestId failed with error: ${e.message}")
             requestStates[requestId] = CrackRequestState(status = RequestStatus.ERROR)
@@ -82,16 +74,16 @@ class CrackHashMutation : Mutation {
     }
 
     /**
-     * Launches all worker coroutines and returns a channel that will receive
-     * the first found word, plus the list of worker jobs for cancellation.
+     * Launches all worker coroutines and waits for their completion.
+     * Returns a list of all words found by any worker.
      */
     private suspend fun CoroutineScope.launchWorkers(
         requestId: String,
         hash: String,
         maxLength: Int,
         config: GatewayConfig.Config
-    ): Pair<Channel<String>, List<Job>> {
-        val resultChannel = Channel<String>()
+    ): List<String> {
+        val results = Collections.synchronizedList(mutableListOf<String>())
         val totalCombinations = calculateTotalCombinations(maxLength, config.alphabet)
 
         val jobs = config.workerHosts.mapIndexed { index, workerHost ->
@@ -104,16 +96,18 @@ class CrackHashMutation : Mutation {
                     maxLength = maxLength,
                     totalCombinations = totalCombinations,
                     config = config,
-                    resultChannel = resultChannel
+                    results = results
                 )
             }
         }
-        return Pair(resultChannel, jobs)
+
+        jobs.joinAll()
+        return results
     }
 
     /**
      * Processes one worker: computes its range, sends a gRPC request,
-     * and if a result is found, pushes it into the result channel.
+     * and if a result is found, adds it to the shared results list and updates the state.
      */
     private suspend fun processSingleWorker(
         requestId: String,
@@ -123,7 +117,7 @@ class CrackHashMutation : Mutation {
         maxLength: Int,
         totalCombinations: BigInteger,
         config: GatewayConfig.Config,
-        resultChannel: Channel<String>
+        results: MutableList<String>
     ) {
         val (startIndex, rangeSize) = calculateWorkerRange(
             workerIndex = workerIndex,
@@ -131,8 +125,7 @@ class CrackHashMutation : Mutation {
             workerCount = config.workerCount
         )
         if (rangeSize <= BigInteger.ZERO) {
-            // No work for this worker
-            return
+            return // No work for this worker
         }
 
         val channel = ManagedChannelBuilder.forAddress(workerHost, config.workerPort)
@@ -147,11 +140,27 @@ class CrackHashMutation : Mutation {
             val response = stub.crack(request)
 
             if (response.foundWord.isNotEmpty()) {
-                // Send the found word to the channel (only the first one will be used)
-                resultChannel.send(response.foundWord)
+                results.add(response.foundWord)
+                println("Found word '${response.foundWord}' from $workerHost for request $requestId")
+
+                // Atomically update the shared state to PARTIAL (if still IN_PROGRESS)
+                requestStates.compute(requestId) { _, currentState ->
+                    when {
+                        currentState == null -> null
+                        currentState.status == RequestStatus.ERROR -> currentState
+                        else -> {
+                            val existingData = currentState.data ?: emptyList()
+                            val newData = existingData + response.foundWord
+                            val newStatus = if (currentState.status == RequestStatus.IN_PROGRESS) {
+                                RequestStatus.PARTIAL
+                            } else {
+                                currentState.status // already PARTIAL or READY (though READY shouldn't happen here)
+                            }
+                            currentState.copy(status = newStatus, data = newData)
+                        }
+                    }
+                }
             }
-        } catch (e: CancellationException) {
-            println("Worker $workerHost for request $requestId was cancelled.")
         } finally {
             channel.shutdown().awaitTermination(5, TimeUnit.SECONDS)
         }

@@ -6,8 +6,10 @@ import java.util.concurrent.ConcurrentHashMap
 
 enum class RequestStatus {
     IN_PROGRESS,
+    PARTIAL,
     READY,
-    ERROR
+    ERROR,
+    TIMEOUT
 }
 
 data class CrackRequestState(
