@@ -20,7 +20,7 @@ class HashCrackerService : HashCrackerServiceGrpcKt.HashCrackerServiceCoroutineI
 
         var i = BigInteger.ZERO
         while (i < rangeSize) {
-            // Check if the coroutine has been cancelled by the gateway
+            // Check if the coroutine has been canceled by the gateway
             yield()
 
             val globalIndex = startIndex + i
@@ -39,11 +39,10 @@ class HashCrackerService : HashCrackerServiceGrpcKt.HashCrackerServiceCoroutineI
 }
 
 internal fun indexToWord(index: BigInteger, alphabet: String): String {
-    var n = index
     val base = BigInteger.valueOf(alphabet.length.toLong())
     val builder = StringBuilder()
 
-    if (n == BigInteger.ZERO) {
+    if (index == BigInteger.ZERO) {
         return alphabet[0].toString()
     }
     
@@ -51,8 +50,8 @@ internal fun indexToWord(index: BigInteger, alphabet: String): String {
     var len = 1
     while (true) {
         val combinationsForLen = base.pow(len)
-        if (n < totalForShorterWords + combinationsForLen) {
-            var indexInLen = n - totalForShorterWords
+        if (index < totalForShorterWords + combinationsForLen) {
+            var indexInLen = index - totalForShorterWords
             for (i in 0 until len) {
                 val remainder = indexInLen % base
                 builder.insert(0, alphabet[remainder.toInt()])

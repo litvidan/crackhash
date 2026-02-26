@@ -19,7 +19,7 @@ POST http://localhost:8080/graphql
 Content-Type: application/json
 
 {
-  "query": "query { hashStatus(requestId: \"cc054fac-6cd3-46ef-acad-a9e737b3a05b\") { status data } }"
+  "query": "query { hashStatus(requestId: \"d0cef7c7-6feb-4465-bd50-acc0159678b6\") { status data } }"
 }
 ### 2.1 Check the hash status of job that doesn't exist
 POST http://localhost:8080/graphql

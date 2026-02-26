@@ -6,10 +6,10 @@ import java.util.concurrent.ConcurrentHashMap
 
 enum class RequestStatus {
     IN_PROGRESS,
-    PARTIAL,
     READY,
-    ERROR,
-    TIMEOUT
+    PARTIAL,
+    TIMEOUT,
+    ERROR
 }
 
 data class CrackRequestState(
@@ -17,7 +17,19 @@ data class CrackRequestState(
     val data: List<String>? = null
 )
 
+// --- Data Models for Worker Results ---
+
+enum class WorkerResultType {
+    SUCCESS,
+    TIMEOUT,
+    ERROR
+}
+
+data class WorkerResult(
+    val type: WorkerResultType,
+    val foundWord: String = ""
+)
+
 // --- In-Memory Storage ---
 
-// A thread-safe map to store the state of each crack request.
 val requestStates = ConcurrentHashMap<String, CrackRequestState>()
