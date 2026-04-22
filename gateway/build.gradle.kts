@@ -34,6 +34,9 @@ dependencies {
     // RabbitMQ Client
     implementation("com.rabbitmq:amqp-client:5.20.0")
 
+    // For JSON serialization
+    implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.10")
+
     testImplementation(kotlin("test"))
 }
 

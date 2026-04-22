@@ -18,6 +18,9 @@ dependencies {
     // For RabbitMQ
     implementation("com.rabbitmq:amqp-client:5.20.0")
 
+    // For JSON serialization
+    implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.10")
+
     // Testing dependencies
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.2")
