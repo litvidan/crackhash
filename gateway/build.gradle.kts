@@ -28,6 +28,12 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
 
+    // MongoDB Kotlin Coroutine Driver
+    implementation("org.mongodb:mongodb-driver-kotlin-coroutine:5.2.0")
+
+    // RabbitMQ Client
+    implementation("com.rabbitmq:amqp-client:5.20.0")
+
     testImplementation(kotlin("test"))
 }
 

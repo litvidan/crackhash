@@ -15,6 +15,9 @@ dependencies {
     // For coroutines in gRPC
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
 
+    // For RabbitMQ
+    implementation("com.rabbitmq:amqp-client:5.20.0")
+
     // Testing dependencies
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.2")
