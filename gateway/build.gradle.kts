@@ -38,6 +38,9 @@ dependencies {
     implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.10")
 
     testImplementation(kotlin("test"))
+
+    // Common project classes
+    implementation(project(":common"))
 }
 
 sourceSets {

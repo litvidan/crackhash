@@ -12,3 +12,4 @@ dependencyResolutionManagement {
 rootProject.name = "CrackHash"
 include("worker")
 include("gateway")
+include("common")
