@@ -1,116 +1,86 @@
 ﻿package com.litvidan.gateway
 
 import com.expediagroup.graphql.server.operations.Mutation
-import com.litvidan.grpc.HashCrackerServiceGrpcKt
-import com.litvidan.grpc.Service
-import io.grpc.ManagedChannel
-import io.grpc.ManagedChannelBuilder
+import com.litvidan.common.RabbitMqService
+import com.litvidan.common.TaskMessage
 import kotlinx.coroutines.*
 import java.math.BigInteger
 import java.util.*
-import java.util.concurrent.TimeUnit
 
 class CrackHashMutation : Mutation {
+    private val repository = TaskRepository()
+    private val rabbitMq = RabbitMqService(GatewayConfig.current.rabbitmqHost)
+    private val config = GatewayConfig.current
 
-    @OptIn(DelicateCoroutinesApi::class)
+    // Background scope for restoring tasks on restart
+    private val recoveryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    init {
+        // Launching the listener for responses from the workers
+        rabbitMq.startResultConsumer { result ->
+            handleWorkerResponse(result)
+        }
+
+        // Restoring tasks that were in operation before the gateway crash
+        recoveryScope.launch {
+            delay(5000) // даём время на подключение к RabbitMQ
+            val pendingTasks = repository.findAllByStatus(TaskStatus.PENDING_WORKER)
+            pendingTasks.forEach { task ->
+                publishTaskParts(task)
+            }
+        }
+    }
+
     fun crackHash(hash: String, maxLength: Int): String {
-        val config = GatewayConfig.current
         val requestId = UUID.randomUUID().toString()
         println("Received crack request for hash '$hash'. Assigned requestId: $requestId")
 
-        requestStates[requestId] = CrackRequestState(status = RequestStatus.IN_PROGRESS)
+        val taskDoc = TaskDocument(
+            requestId = requestId,
+            hash = hash,
+            maxLength = maxLength,
+            alphabet = config.alphabet,
+            status = TaskStatus.PENDING_QUEUE
+        )
 
-        GlobalScope.launch {
-            handleCrackRequest(requestId, hash, maxLength, config)
+        runBlocking {
+            // Save the task in MongoDB with a guarantee of replication
+            repository.save(taskDoc)
+
+            // Split and publish the parts in the queue
+            publishTaskParts(taskDoc)
+
+            // Update status to PENDING_WORKER
+            repository.updateStatus(requestId, TaskStatus.PENDING_WORKER)
         }
 
         return requestId
     }
 
-    private suspend fun handleCrackRequest(
-        requestId: String,
-        hash: String,
-        maxLength: Int,
-        config: GatewayConfig.Config
-    ) {
-        try {
-            coroutineScope {
-                val totalCombinations = calculateTotalCombinations(maxLength, config.alphabet)
+    private suspend fun publishTaskParts(task: TaskDocument) {
+        val totalCombinations = calculateTotalCombinations(task.maxLength, task.alphabet)
+        val parts = splitIntoParts(totalCombinations, config.taskPartitionCount)
 
-                val tasks = config.workerHosts.mapIndexed { index, workerHost ->
-                    async {
-                        val (startIndex, rangeSize) = calculateWorkerRange(index, totalCombinations, config.workerCount)
-                        if (rangeSize <= BigInteger.ZERO) {
-                            return@async WorkerResult(WorkerResultType.SUCCESS)
-                        }
-                        processSingleWorker(requestId, workerHost, hash, config, maxLength, startIndex, rangeSize)
-                    }
-                }
-
-                val results = tasks.awaitAll()
-
-                // --- Final Status Logic ---
-                val foundWords = results.mapNotNull { it.foundWord.ifEmpty { null } }
-                val numTimeouts = results.count { it.type == WorkerResultType.TIMEOUT }
-                val numErrors = results.count { it.type == WorkerResultType.ERROR }
-
-                val finalStatus = when {
-                    foundWords.isNotEmpty() -> RequestStatus.READY
-                    numTimeouts == config.workerCount -> RequestStatus.TIMEOUT
-                    numErrors > 0 || numTimeouts > 0 -> RequestStatus.ERROR
-                    else -> RequestStatus.READY
-                }
-                
-                requestStates[requestId] = CrackRequestState(
-                    status = finalStatus,
-                    data = foundWords.ifEmpty { null }
-                )
-                println("Request $requestId finished with final status $finalStatus.")
-            }
-        } catch (e: Exception) {
-            println("Request $requestId failed with a critical gateway error: ${e.message}")
-            requestStates[requestId] = CrackRequestState(status = RequestStatus.ERROR)
+        parts.forEach { (start, size) ->
+            val taskMessage = TaskMessage(
+                requestId = task.requestId,
+                hash = task.hash,
+                alphabet = task.alphabet,
+                maxLength = task.maxLength,
+                startIndex = start.toLong(),
+                rangeSize = size.toLong()
+            )
+            rabbitMq.sendTask(taskMessage)
         }
+        println("Published ${parts.size} parts for request ${task.requestId}")
     }
 
-    private suspend fun processSingleWorker(
-        requestId: String,
-        workerHost: String,
-        hash: String,
-        config: GatewayConfig.Config,
-        maxLength: Int,
-        startIndex: BigInteger,
-        rangeSize: BigInteger
-    ): WorkerResult {
-        var channel: ManagedChannel? = null
-        return try {
-            withTimeout(config.requestTimeoutMillis) {
-                channel = ManagedChannelBuilder.forAddress(workerHost, config.workerPort).usePlaintext().build()
-                
-                val stub = HashCrackerServiceGrpcKt.HashCrackerServiceCoroutineStub(channel)
-                val request = buildWorkerRequest(hash, config.alphabet, maxLength, startIndex, rangeSize)
-
-                println("Dispatching task to $workerHost for requestId $requestId")
-                val response = stub.crack(request)
-
-                if (response.foundWord.isNotEmpty()) {
-                    println("Found word '${response.foundWord}' from $workerHost for request $requestId")
-                    requestStates.compute(requestId) { _, currentState ->
-                        val existingData = currentState?.data ?: emptyList()
-                        val newData = existingData + response.foundWord
-                        CrackRequestState(RequestStatus.PARTIAL, newData)
-                    }
-                }
-                WorkerResult(WorkerResultType.SUCCESS, response.foundWord)
-            }
-        } catch (e: TimeoutCancellationException) {
-            println("Worker $workerHost timed out: ${e.message}")
-            WorkerResult(WorkerResultType.TIMEOUT)
-        } catch (e: Exception) {
-            println("Error processing worker $workerHost: ${e.message}")
-            WorkerResult(WorkerResultType.ERROR)
-        } finally {
-            channel?.shutdown()?.awaitTermination(5, TimeUnit.SECONDS)
+    private suspend fun handleWorkerResponse(result: com.litvidan.common.ResultMessage) {
+        val requestId = result.requestId
+        if (result.foundWord.isNotEmpty()) {
+            println("Received result for $requestId: ${result.foundWord}")
+            repository.addFoundWord(requestId, result.foundWord)
+            repository.updateStatus(requestId, TaskStatus.COMPLETED)
         }
     }
 
@@ -121,34 +91,12 @@ class CrackHashMutation : Mutation {
         }
     }
 
-    private fun calculateWorkerRange(
-        workerIndex: Int,
-        totalCombinations: BigInteger,
-        workerCount: Int
-    ): Pair<BigInteger, BigInteger> {
-        val rangePerWorker = totalCombinations / workerCount.toBigInteger()
-        val startIndex = workerIndex.toBigInteger() * rangePerWorker
-        val rangeSize = if (workerIndex == workerCount - 1) {
-            totalCombinations - startIndex
-        } else {
-            rangePerWorker
+    private fun splitIntoParts(total: BigInteger, partsCount: Int): List<Pair<BigInteger, BigInteger>> {
+        val rangePerWorker = total / partsCount.toBigInteger()
+        return (0 until partsCount).map { i ->
+            val start = i.toBigInteger() * rangePerWorker
+            val size = if (i == partsCount - 1) total - start else rangePerWorker
+            Pair(start, size)
         }
-        return Pair(startIndex, rangeSize)
-    }
-
-    private fun buildWorkerRequest(
-        hash: String,
-        alphabet: String,
-        maxLength: Int,
-        startIndex: BigInteger,
-        rangeSize: BigInteger
-    ): Service.CrackRequest {
-        return Service.CrackRequest.newBuilder()
-            .setTargetHash(hash)
-            .setAlphabet(alphabet)
-            .setMaxLength(maxLength)
-            .setStartIndex(startIndex.toLong())
-            .setRangeSize(rangeSize.toLong())
-            .build()
     }
 }
