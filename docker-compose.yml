@@ -1,70 +1,117 @@
 ﻿services:
+  # =================== MongoDB Replica Set (3 nodes) ===================
+  mongo1:
+    image: mongo:7.0
+    command: mongod --replSet re0 --bind_ip_all --port 27017
+    volumes:
+      - mongo1-data:/data/db
+    networks:
+      - crackhash-net
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == node-2
+      restart_policy:
+        condition: on-failure
+
+  mongo2:
+    image: mongo:7.0
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    volumes:
+      - mongo2-data:/data/db
+    networks:
+      - crackhash-net
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == node-3
+      restart_policy:
+        condition: on-failure
+
+  mongo3:
+    image: mongo:7.0
+    command: mongod --replSet re0 --bind_ip_all --port 27017
+    volumes:
+      - mongo3-data:/data/db
+    networks:
+      - crackhash-net
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == node-4
+      restart_policy:
+        condition: on-failure
+
+  #  ============================ RabbitMQ =========================
+  rabbitmq:
+    image: rabbitmq:3-management
+    hostname: rabbitmq
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - crackhash-net
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == node-1
+      restart_policy:
+        condition: on-failure
+
+  #  ============================ Gateway =========================
   gateway:
-    image: crackhash/gateway
+    image: crackhash/gateway:latest
     build:
       context: .
       dockerfile: gateway/Dockerfile
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          memory: 256M
     ports:
       - "8080:8080"
+    environment:
+      - MONGO_URI=mongodb://mongo1:27017, mongo2:27017, mongo3:27017
+      - RABBITMQ_HOST=rabbitmq
     depends_on:
-      - worker-1
-      - worker-2
-      - worker-3
+      - rabbitmq
+      - mongo1
+      - mongo2
+      - mongo3
     networks:
       - crackhash-net
-
-  worker-1:
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == worker
+          -
+  #  ============================ Worker =========================
+  worker:
     image: crackhash/worker
     build:
       context: .
       dockerfile: worker/Dockerfile
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          memory: 256M
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      - rabbitmq
     networks:
       - crackhash-net
-
-  worker-2:
-    image: crackhash/worker
-    build:
-      context: .
-      dockerfile: worker/Dockerfile
     deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          memory: 256M
-    networks:
-      - crackhash-net
+      replicas: 3
+      placement:
+        max_replicas_per_node: 1
+        constraints:
+          - node.role == worker
+      restart_policy:
+        condition: on-failure
 
-  worker-3:
-    image: crackhash/worker
-    build:
-      context: .
-      dockerfile: worker/Dockerfile
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          memory: 256M
-    networks:
-      - crackhash-net
-
+#  ============================ Networks =========================
 networks:
   crackhash-net:
-    driver: bridge
+    driver: overlay
+
+#  ============================ Volumes =========================
+volumes:
+  mongo1-data:
+  mongo2-data:
+  mongo3-data:
+  rabbitmq-data:
