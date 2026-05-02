@@ -24,7 +24,7 @@ fun main() {
         )
 
         // Sending the result back to the response queue
-        rabbitMq.sendResult(ResultMessage(task.requestId, foundWord))
+        rabbitMq.sendResult(ResultMessage(task.requestId, task.partId, foundWord))
 
         if (foundWord.isNotEmpty()) {
             println("Found word '$foundWord' for request ${task.requestId}")

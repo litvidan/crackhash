@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class TaskMessage(
     val requestId: String,
+    val partId: Int,
     val hash: String,
     val alphabet: String,
     val maxLength: Int,
@@ -15,5 +16,6 @@ data class TaskMessage(
 @Serializable
 data class ResultMessage(
     val requestId: String,
+    val partId: Int,
     val foundWord: String = ""
 )

@@ -2,6 +2,7 @@
 
 import com.expediagroup.graphql.server.operations.Mutation
 import com.litvidan.common.RabbitMqService
+import com.litvidan.common.ResultMessage
 import com.litvidan.common.TaskMessage
 import kotlinx.coroutines.*
 import java.math.BigInteger
@@ -12,21 +13,20 @@ class CrackHashMutation : Mutation {
     private val rabbitMq = RabbitMqService(GatewayConfig.current.rabbitmqHost)
     private val config = GatewayConfig.current
 
-    // Background scope for restoring tasks on restart
     private val recoveryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
-        // Launching the listener for responses from the workers
+        // Start the listener for worker results
         rabbitMq.startResultConsumer { result ->
             handleWorkerResponse(result)
         }
 
-        // Restoring tasks that were in operation before the gateway crash
+        // On startup, re-send any pending parts that were not yet processed
         recoveryScope.launch {
-            delay(5000) // даём время на подключение к RabbitMQ
+            delay(5_000) // give RabbitMQ some time to connect
             val pendingTasks = repository.findAllByStatus(TaskStatus.PENDING_WORKER)
             pendingTasks.forEach { task ->
-                publishTaskParts(task)
+                resendMissingParts(task)
             }
         }
     }
@@ -40,17 +40,18 @@ class CrackHashMutation : Mutation {
             hash = hash,
             maxLength = maxLength,
             alphabet = config.alphabet,
+            totalParts = config.taskPartitionCount,   // store total parts from the beginning
             status = TaskStatus.PENDING_QUEUE
         )
 
         runBlocking {
-            // Save the task in MongoDB with a guarantee of replication
+            // Save to MongoDB with majority write concern
             repository.save(taskDoc)
 
-            // Split and publish the parts in the queue
+            // Split and publish all parts
             publishTaskParts(taskDoc)
 
-            // Update status to PENDING_WORKER
+            // Mark as waiting for workers
             repository.updateStatus(requestId, TaskStatus.PENDING_WORKER)
         }
 
@@ -59,11 +60,12 @@ class CrackHashMutation : Mutation {
 
     private suspend fun publishTaskParts(task: TaskDocument) {
         val totalCombinations = calculateTotalCombinations(task.maxLength, task.alphabet)
-        val parts = splitIntoParts(totalCombinations, config.taskPartitionCount)
+        val parts = splitIntoParts(totalCombinations, task.totalParts)
 
-        parts.forEach { (start, size) ->
+        parts.forEachIndexed { partId, (start, size) ->
             val taskMessage = TaskMessage(
                 requestId = task.requestId,
+                partId = partId,
                 hash = task.hash,
                 alphabet = task.alphabet,
                 maxLength = task.maxLength,
@@ -72,15 +74,51 @@ class CrackHashMutation : Mutation {
             )
             rabbitMq.sendTask(taskMessage)
         }
+
         println("Published ${parts.size} parts for request ${task.requestId}")
     }
 
-    private suspend fun handleWorkerResponse(result: com.litvidan.common.ResultMessage) {
-        val requestId = result.requestId
+    /**
+     * Re-send only the parts that haven't been processed yet (for crash recovery).
+     */
+    private suspend fun resendMissingParts(task: TaskDocument) {
+        if (task.status != TaskStatus.PENDING_WORKER) return
+
+        val processed = task.processedParts
+        val totalParts = task.totalParts
+        val missingPartIds = (0 until totalParts).filter { it !in processed }
+        if (missingPartIds.isEmpty()) {
+            // All parts already done – mark completed just in case
+            repository.updateStatus(task.requestId, TaskStatus.COMPLETED)
+            return
+        }
+
+        val totalCombinations = calculateTotalCombinations(task.maxLength, task.alphabet)
+        val allParts = splitIntoParts(totalCombinations, totalParts)
+
+        missingPartIds.forEach { partId ->
+            val (start, size) = allParts[partId]
+            val taskMessage = TaskMessage(
+                requestId = task.requestId,
+                partId = partId,
+                hash = task.hash,
+                alphabet = task.alphabet,
+                maxLength = task.maxLength,
+                startIndex = start.toLong(),
+                rangeSize = size.toLong()
+            )
+            rabbitMq.sendTask(taskMessage)
+        }
+        println("Recovery: re-published ${missingPartIds.size} missing parts for request ${task.requestId}")
+    }
+
+    private suspend fun handleWorkerResponse(result: ResultMessage) {
+        val processed = repository.tryProcessPart(result.requestId, result.partId, result.foundWord)
         if (result.foundWord.isNotEmpty()) {
-            println("Received result for $requestId: ${result.foundWord}")
-            repository.addFoundWord(requestId, result.foundWord)
-            repository.updateStatus(requestId, TaskStatus.COMPLETED)
+            println("Received result for ${result.requestId} part ${result.partId}: ${result.foundWord}")
+        }
+        if (!processed) {
+            println("Ignored duplicate response for ${result.requestId} part ${result.partId}")
         }
     }
 

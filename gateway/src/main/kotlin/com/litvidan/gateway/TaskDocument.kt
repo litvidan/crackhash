@@ -12,6 +12,9 @@ data class TaskDocument(
     val alphabet: String,
     var status: TaskStatus = TaskStatus.PENDING_QUEUE,
     val foundWords: MutableList<String> = mutableListOf(),
+    val totalParts: Int = 0,
+    val completedParts: Int = 0,
+    val processedParts: MutableSet<Int> = mutableSetOf(),
     val createdAt: Long = System.currentTimeMillis()
 )
 

@@ -1,0 +1,5 @@
+﻿docker exec -it node-1 sh -c "docker node update --label-add hostname=node-1 node-1"
+docker exec -it node-1 sh -c "docker node update --label-add hostname=node-2 node-2"
+docker exec -it node-1 sh -c "docker node update --label-add hostname=node-3 node-3"
+docker exec -it node-1 sh -c "docker node update --label-add hostname=node-4 node-4"
+docker exec -it node-1 sh -c "docker node update --label-add hostname=node-5 node-5"

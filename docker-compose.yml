@@ -2,7 +2,7 @@
   # =================== MongoDB Replica Set (3 nodes) ===================
   mongo1:
     image: mongo:7.0
-    command: mongod --replSet re0 --bind_ip_all --port 27017
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
     volumes:
       - mongo1-data:/data/db
     networks:
@@ -10,7 +10,7 @@
     deploy:
       placement:
         constraints:
-          - node.hostname == node-2
+          - node.hostname == node-1
       restart_policy:
         condition: on-failure
 
@@ -24,13 +24,13 @@
     deploy:
       placement:
         constraints:
-          - node.hostname == node-3
+          - node.hostname == node-2
       restart_policy:
         condition: on-failure
 
   mongo3:
     image: mongo:7.0
-    command: mongod --replSet re0 --bind_ip_all --port 27017
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
     volumes:
       - mongo3-data:/data/db
     networks:
@@ -38,9 +38,35 @@
     deploy:
       placement:
         constraints:
-          - node.hostname == node-4
+          - node.hostname == node-3
       restart_policy:
         condition: on-failure
+
+  mongo-init:
+    image: mongo:7.0
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+    networks:
+      - crackhash-net
+    volumes:
+      - ./mongo-init.js:/mongo-init.js:ro
+    command: >
+      bash -c "
+        echo 'Waiting for MongoDB to start...';
+        sleep 10;
+        mongosh --host mongo1:27017 /mongo-init.js;
+        echo 'Replica set initiated.';
+      "
+    restart: "no"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+          - node.labels.hostname == node-1
 
   #  ============================ RabbitMQ =========================
   rabbitmq:
@@ -53,7 +79,7 @@
     deploy:
       placement:
         constraints:
-          - node.hostname == node-1
+          - node.hostname == node-3
       restart_policy:
         condition: on-failure
 
@@ -81,8 +107,8 @@
         condition: on-failure
       placement:
         constraints:
-          - node.role == worker
-          -
+          - node.hostname == node-3
+
   #  ============================ Worker =========================
   worker:
     image: crackhash/worker
@@ -107,7 +133,7 @@
 #  ============================ Networks =========================
 networks:
   crackhash-net:
-    driver: overlay
+    driver: bridge
 
 #  ============================ Volumes =========================
 volumes:

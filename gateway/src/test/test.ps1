@@ -1,0 +1,1 @@
+﻿curl.exe -X POST http://localhost:8080/graphql -H "Content-Type: application/json" -d '{\"query\": \"mutation { crackHash(hash: \\\"e99a18c428cb38d5f260853678922e03\\\", maxLength: 4) }\"}'
