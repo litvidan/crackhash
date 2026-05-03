@@ -1,0 +1,99 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>CrackHash client</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 2rem; }
+        label { display: block; margin-top: 1rem; }
+        input { padding: 0.3rem; width: 300px; }
+        button { margin-top: 1rem; padding: 0.4rem 1rem; cursor: pointer; }
+        #status { margin-top: 1.5rem; white-space: pre-wrap; background: #f4f4f4; padding: 1rem; border-radius: 4px; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+<h2>Распределённый взлом MD5</h2>
+<label>MD5-хеш (пример):</label>
+<input type="text" id="hashInput" value="e99a18c428cb38d5f260853678922e03" />
+<label>Максимальная длина слова:</label>
+<input type="number" id="maxLenInput" value="4" min="1" max="6" />
+<button onclick="crack()">Взломать</button>
+
+<div id="status"></div>
+
+<script>
+    const GRAPHQL_URL = 'http://localhost:8080/graphql';
+
+    // Функция для отправки GraphQL-запроса
+    async function graphqlQuery(query) {
+      const resp = await fetch(GRAPHQL_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query })
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json = await resp.json();
+      if (json.errors) throw new Error(json.errors[0].message);
+      return json.data;
+    }
+
+    // Мутация: запустить взлом
+    async function crack() {
+      const hash = document.getElementById('hashInput').value.trim();
+      const maxLength = parseInt(document.getElementById('maxLenInput').value, 10);
+      if (!hash || !maxLength) {
+        document.getElementById('status').innerHTML = '<span class="error">Заполните все поля</span>';
+        return;
+      }
+      document.getElementById('status').innerText = 'Отправка задачи...';
+      try {
+        const data = await graphqlQuery(
+          `mutation { crackHash(hash: "${hash}", maxLength: ${maxLength}) }`
+        );
+        const requestId = data.crackHash;
+        document.getElementById('status').innerText = `Задача создана, ID: ${requestId}. Ожидайте...`;
+        // Начать опрос статуса
+        pollStatus(requestId);
+      } catch (e) {
+        document.getElementById('status').innerHTML = `<span class="error">Ошибка: ${e.message}</span>`;
+      }
+    }
+
+    // Опрос статуса каждые 2 секунды
+    async function pollStatus(requestId) {
+      const tryPoll = async () => {
+        try {
+          const data = await graphqlQuery(
+            `query { hashStatus(requestId: "${requestId}") { status data } }`
+          );
+          const state = data.hashStatus;
+          if (!state) {
+            document.getElementById('status').innerText = 'Задача не найдена (возможно, ещё обрабатывается)';
+            return;
+          }
+          const statusText = state.status;
+          const foundWords = state.data ? state.data.join(', ') : 'нет';
+          let display = `Статус: ${statusText}\nНайденные слова: ${foundWords}`;
+          if (statusText === 'IN_PROGRESS' || statusText === 'READY') {
+            // Если статус не финальный, продолжаем опрос
+            if (statusText !== 'READY') {
+              display += '\n(ожидание завершения...)';
+            }
+            document.getElementById('status').innerText = display;
+            if (statusText !== 'READY') {
+              setTimeout(tryPoll, 2000);
+            }
+          } else {
+            // Финальные статусы: READY, ERROR, TIMEOUT
+            document.getElementById('status').innerText = display;
+          }
+        } catch (e) {
+          document.getElementById('status').innerHTML = `<span class="error">Ошибка опроса: ${e.message}</span>`;
+        }
+      };
+      tryPoll();
+    }
+</script>
+</body>
+</html>

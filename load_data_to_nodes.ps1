@@ -1,4 +1,5 @@
 ﻿docker cp docker-compose.yml node-1:/docker-compose.yml
+docker cp mongo-init.js node-1:/mongo-init.js
 
 docker cp gateway.tar node-3:/gateway.tar
 docker exec -it node-3 sh -c "docker load -i /gateway.tar"

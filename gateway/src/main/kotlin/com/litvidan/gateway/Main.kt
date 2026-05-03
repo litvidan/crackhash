@@ -5,6 +5,7 @@ import com.expediagroup.graphql.server.ktor.graphQLPostRoute
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
+import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.routing.*
 
 fun main() {
@@ -12,6 +13,11 @@ fun main() {
     GatewayConfig.current
 
     embeddedServer(Netty, port = 8080) {
+        install(CORS) {
+            anyHost()
+            allowCredentials = true
+            allowNonSimpleContentTypes = true
+        }
         install(GraphQL) {
             schema {
                 packages = listOf("com.litvidan.gateway")
