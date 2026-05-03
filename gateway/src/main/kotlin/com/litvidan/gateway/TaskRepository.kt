@@ -62,4 +62,13 @@ class TaskRepository {
         }
         return false
     }
+
+    suspend fun findByHashAndMaxLength(hash: String, maxLength: Int): TaskDocument? {
+        return collection.find(
+            Filters.and(
+                Filters.eq(TaskDocument::hash.name, hash),
+                Filters.eq(TaskDocument::maxLength.name, maxLength)
+            )
+        ).firstOrNull()
+    }
 }

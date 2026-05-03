@@ -32,6 +32,13 @@ class CrackHashMutation : Mutation {
     }
 
     fun crackHash(hash: String, maxLength: Int): String {
+        // Проверка дубликата
+        val existing = runBlocking { repository.findByHashAndMaxLength(hash, maxLength) }
+        if (existing != null) {
+            println("Duplicate request for hash '$hash' with maxLength=$maxLength. Returning existing requestId: ${existing.requestId}")
+            return existing.requestId
+        }
+
         val requestId = UUID.randomUUID().toString()
         println("Received crack request for hash '$hash'. Assigned requestId: $requestId")
 
@@ -40,18 +47,13 @@ class CrackHashMutation : Mutation {
             hash = hash,
             maxLength = maxLength,
             alphabet = config.alphabet,
-            totalParts = config.taskPartitionCount,   // store total parts from the beginning
+            totalParts = config.taskPartitionCount,
             status = TaskStatus.PENDING_QUEUE
         )
 
         runBlocking {
-            // Save to MongoDB with majority write concern
             repository.save(taskDoc)
-
-            // Split and publish all parts
             publishTaskParts(taskDoc)
-
-            // Mark as waiting for workers
             repository.updateStatus(requestId, TaskStatus.PENDING_WORKER)
         }
 

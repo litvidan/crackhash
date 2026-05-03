@@ -19,6 +19,7 @@ class RabbitMqService(host: String = "rabbitmq") {
         channel.exchangeDeclare(RESULT_EXCHANGE, "direct", true)
         channel.queueBind(TASK_QUEUE, TASK_EXCHANGE, TASK_ROUTING_KEY)
         channel.queueBind(RESULT_QUEUE, RESULT_EXCHANGE, RESULT_ROUTING_KEY)
+        channel.basicQos(1)
     }
 
     suspend fun sendTask(task: TaskMessage) {

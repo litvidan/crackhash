@@ -10,6 +10,7 @@
         button { margin-top: 1rem; padding: 0.4rem 1rem; cursor: pointer; }
         #status { margin-top: 1.5rem; white-space: pre-wrap; background: #f4f4f4; padding: 1rem; border-radius: 4px; }
         .error { color: red; }
+        .warning { color: orange; }
     </style>
 </head>
 <body>
@@ -20,22 +21,39 @@
 <input type="number" id="maxLenInput" value="4" min="1" max="6" />
 <button onclick="crack()">Взломать</button>
 
-<div id="status"></div>
+<div id="status">Ожидание команды</div>
 
 <script>
     const GRAPHQL_URL = 'http://localhost:8080/graphql';
+    let statusDiv = document.getElementById('status');
+    let retryTimeout = null;
 
-    // Функция для отправки GraphQL-запроса
+    // Функция для отправки GraphQL-запроса с таймаутом (10 секунд)
     async function graphqlQuery(query) {
-      const resp = await fetch(GRAPHQL_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query })
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const json = await resp.json();
-      if (json.errors) throw new Error(json.errors[0].message);
-      return json.data;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      try {
+        const resp = await fetch(GRAPHQL_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+        if (json.errors) throw new Error(json.errors[0].message);
+        return json.data;
+      } catch (e) {
+        clearTimeout(timeoutId);
+        throw e;
+      }
+    }
+
+    // Отобразить сообщение в блоке статуса
+    function setStatus(message, className = '') {
+      statusDiv.innerText = message;
+      statusDiv.className = className;
     }
 
     // Мутация: запустить взлом
@@ -43,25 +61,36 @@
       const hash = document.getElementById('hashInput').value.trim();
       const maxLength = parseInt(document.getElementById('maxLenInput').value, 10);
       if (!hash || !maxLength) {
-        document.getElementById('status').innerHTML = '<span class="error">Заполните все поля</span>';
+        setStatus('Заполните все поля', 'error');
         return;
       }
-      document.getElementById('status').innerText = 'Отправка задачи...';
+      setStatus('Отправка задачи...');
       try {
         const data = await graphqlQuery(
           `mutation { crackHash(hash: "${hash}", maxLength: ${maxLength}) }`
         );
         const requestId = data.crackHash;
-        document.getElementById('status').innerText = `Задача создана, ID: ${requestId}. Ожидайте...`;
+        setStatus(`Задача создана, ID: ${requestId}. Ожидайте...`);
         // Начать опрос статуса
         pollStatus(requestId);
       } catch (e) {
-        document.getElementById('status').innerHTML = `<span class="error">Ошибка: ${e.message}</span>`;
+        if (e.name === 'AbortError') {
+          setStatus('Gateway недоступен (таймаут запроса). Повторяю попытку...', 'warning');
+        } else {
+          setStatus(`Ошибка: ${e.message}. Gateway недоступен, повторяю попытку...`, 'warning');
+        }
+        // Повторить создание задачи через 2 секунды
+        retryTimeout = setTimeout(() => crack(), 2000);
       }
     }
 
-    // Опрос статуса каждые 2 секунды
+    // Опрос статуса задачи
     async function pollStatus(requestId) {
+      if (retryTimeout) {
+        clearTimeout(retryTimeout);
+        retryTimeout = null;
+      }
+
       const tryPoll = async () => {
         try {
           const data = await graphqlQuery(
@@ -69,29 +98,35 @@
           );
           const state = data.hashStatus;
           if (!state) {
-            document.getElementById('status').innerText = 'Задача не найдена (возможно, ещё обрабатывается)';
+            setStatus('Задача не найдена (возможно, ещё не обработана). Ожидаю...');
+            retryTimeout = setTimeout(tryPoll, 2000);
             return;
           }
+
           const statusText = state.status;
           const foundWords = state.data ? state.data.join(', ') : 'нет';
           let display = `Статус: ${statusText}\nНайденные слова: ${foundWords}`;
-          if (statusText === 'IN_PROGRESS' || statusText === 'READY') {
-            // Если статус не финальный, продолжаем опрос
-            if (statusText !== 'READY') {
-              display += '\n(ожидание завершения...)';
-            }
-            document.getElementById('status').innerText = display;
-            if (statusText !== 'READY') {
-              setTimeout(tryPoll, 2000);
-            }
+
+          if (statusText === 'IN_PROGRESS' || statusText === 'PENDING') {
+            display += '\n(ожидание завершения...)';
+            setStatus(display);
+            retryTimeout = setTimeout(tryPoll, 2000);
           } else {
             // Финальные статусы: READY, ERROR, TIMEOUT
-            document.getElementById('status').innerText = display;
+            setStatus(display);
           }
         } catch (e) {
-          document.getElementById('status').innerHTML = `<span class="error">Ошибка опроса: ${e.message}</span>`;
+          // Сетевая ошибка или таймаут – gateway недоступен
+          if (e.name === 'AbortError') {
+            setStatus('Gateway недоступен (таймаут). Повторяю опрос статуса...', 'warning');
+          } else {
+            setStatus(`Gateway недоступен (${e.message}). Повторяю опрос статуса...`, 'warning');
+          }
+          // Повторять опрос, пока не получим ответ
+          retryTimeout = setTimeout(tryPoll, 2000);
         }
       };
+
       tryPoll();
     }
 </script>
