@@ -71,4 +71,15 @@ class TaskRepository {
             )
         ).firstOrNull()
     }
+
+    suspend fun tryClaimPendingQueueTask(requestId: String): Boolean {
+        val result = collection.updateOne(
+            Filters.and(
+                Filters.eq(TaskDocument::requestId.name, requestId),
+                Filters.eq(TaskDocument::status.name, TaskStatus.PENDING_QUEUE.name)
+            ),
+            Updates.set(TaskDocument::status.name, TaskStatus.PENDING_WORKER.name)
+        )
+        return result.modifiedCount > 0
+    }
 }

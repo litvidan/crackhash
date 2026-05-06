@@ -16,17 +16,41 @@ class CrackHashMutation : Mutation {
     private val recoveryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
-        // Start the listener for worker results
-        rabbitMq.startResultConsumer { result ->
-            handleWorkerResponse(result)
+        rabbitMq.startResultConsumer { result -> handleWorkerResponse(result) }
+
+        // Восстановление PENDING_WORKER задач
+        recoveryScope.launch {
+            delay(5_000)
+            val pendingTasks = repository.findAllByStatus(TaskStatus.PENDING_WORKER)
+            pendingTasks.forEach { task -> resendMissingParts(task) }
         }
 
-        // On startup, re-send any pending parts that were not yet processed
+        // Фоновый процесс для PENDING_QUEUE задач
         recoveryScope.launch {
-            delay(5_000) // give RabbitMQ some time to connect
-            val pendingTasks = repository.findAllByStatus(TaskStatus.PENDING_WORKER)
-            pendingTasks.forEach { task ->
-                resendMissingParts(task)
+            while (isActive) {
+                delay(5_000)  // проверять раз в 5 секунд
+                try {
+                    processPendingQueueTasks()
+                } catch (e: Exception) {
+                    println("Error processing PENDING_QUEUE tasks: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private suspend fun processPendingQueueTasks() {
+        val pendingTasks = repository.findAllByStatus(TaskStatus.PENDING_QUEUE)
+        for (task in pendingTasks) {
+            // Пытаемся захватить задачу (атомарно сменить статус на PENDING_WORKER)
+            if (repository.tryClaimPendingQueueTask(task.requestId)) {
+                try {
+                    println("Resending PENDING_QUEUE task ${task.requestId}")
+                    publishTaskParts(task)
+                } catch (e: Exception) {
+                    // Если публикация не удалась, возвращаем статус обратно для повторной попытки
+                    println("Failed to resend task ${task.requestId}: ${e.message}")
+                    repository.updateStatus(task.requestId, TaskStatus.PENDING_QUEUE)
+                }
             }
         }
     }
