@@ -92,6 +92,10 @@ CrackHash/
    ```powershell
    docker compose -f docker-compose.local.yml up --build
    ```
+   Для масштабирования используйте: 
+   ```powershell
+   docker compose -f docker-compose.local.yml up --scale worker=3
+   ```
 Первый раз MongoDB скачается с Docker Hub, а Gateway и Worker соберутся из исходников.
 
 4. **Дождитесь инициализации репликасета**  
@@ -131,15 +135,15 @@ CrackHash/
 
 ### Создание виртуальных узлов и деплой
 
-1. **Инициализируйте Swarm и получите токены присоединения к кластеру**:
+1. **Запустите 5 dind‑контейнеров**:
+   ```powershell
+   .\create_nodes.ps1
+   ```
+
+2. **Инициализируйте Swarm и получите токены присоединения к кластеру**:
    ```powershell
         docker exec -it node-1 sh -c "docker swarm init"
         docker exec -it node-1 sh -c "docker swarm join-token manager"
-   ```
-
-2. **Запустите 5 dind‑контейнеров**:
-   ```powershell
-   .\create_nodes.ps1
    ```
 
 3. **Присоедините их к кластеру**:

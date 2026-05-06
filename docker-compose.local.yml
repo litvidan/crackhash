@@ -55,7 +55,7 @@
     networks:
       - crackhash-net
     ports:
-      - "15672:15672"  # для доступа к панели управления
+      - "15672"  # для доступа к панели управления
     restart: on-failure
 
   #  ============================ Gateway =========================
@@ -91,7 +91,7 @@
     networks:
       - crackhash-net
     restart: on-failure
-    # Для масштабирования используйте: docker compose -f docker-compose.local.yml up --scale worker=3
+    scale: 3
 
 #  ============================ Networks =========================
 networks:
