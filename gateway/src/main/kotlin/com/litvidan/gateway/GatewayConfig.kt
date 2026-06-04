@@ -1,6 +1,5 @@
 ﻿package com.litvidan.gateway
 
-import java.io.FileInputStream
 import java.io.InputStream
 import java.util.*
 
@@ -9,11 +8,11 @@ object GatewayConfig {
     private const val SYSTEM_PROPERTY_KEY = "gateway.config"
 
     data class Config(
-        val workerHosts: List<String>,
-        val workerPort: Int,
+        val rabbitmqHost: String,
+        val mongoUri: String,
+        val mongoDatabase: String,
         val alphabet: String,
-        val requestTimeoutMillis: Long,
-        val workerCount: Int
+        val taskPartitionCount: Int
     )
 
     val current: Config by lazy { loadConfig() }
@@ -23,44 +22,20 @@ object GatewayConfig {
         val configPath = System.getProperty(SYSTEM_PROPERTY_KEY)
 
         val inputStream: InputStream = if (configPath != null) {
-            // If system property is set, try to load from file system
-            FileInputStream(configPath)
+            java.io.FileInputStream(configPath)
         } else {
-            // Otherwise, load from classpath resources
-            val resourceStream = GatewayConfig::class.java.classLoader.getResourceAsStream(DEFAULT_CONFIG_FILE)
-                ?: throw IllegalStateException("Configuration file '$DEFAULT_CONFIG_FILE' not found in classpath")
-            resourceStream
+            javaClass.classLoader.getResourceAsStream(DEFAULT_CONFIG_FILE)
+                ?: throw IllegalStateException("Configuration file '$DEFAULT_CONFIG_FILE' not found")
         }
 
-        inputStream.use { stream ->
-            props.load(stream)
-        }
-
-        // Parse with validation
-        val hosts = props.getProperty("worker.hosts")
-            ?.split(",")
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("Missing or empty 'worker.hosts' in config")
-
-        val port = props.getProperty("worker.port")?.toIntOrNull()
-            ?: throw IllegalArgumentException("Invalid or missing 'worker.port'")
-
-        val alphabet = props.getProperty("alphabet")
-            ?: throw IllegalArgumentException("Missing 'alphabet'")
-
-        val timeout = props.getProperty("request.timeout.ms")?.toLongOrNull()
-            ?: throw IllegalArgumentException("Invalid or missing 'request.timeout.ms'")
-
-        val count = props.getProperty("worker.count")?.toIntOrNull()
-            ?: throw IllegalArgumentException("Invalid or missing 'worker.count'")
+        inputStream.use { props.load(it) }
 
         return Config(
-            workerHosts = hosts,
-            workerPort = port,
-            alphabet = alphabet,
-            requestTimeoutMillis = timeout,
-            workerCount = count
+            rabbitmqHost = props.getProperty("rabbitmq.host") ?: "rabbitmq",
+            mongoUri = props.getProperty("mongo.uri") ?: "mongodb://localhost:27017",
+            mongoDatabase = props.getProperty("mongo.database") ?: "crackhash",
+            alphabet = props.getProperty("alphabet") ?: "abcdefghijklmnopqrstuvwxyz0123456789",
+            taskPartitionCount = props.getProperty("task.partition.count")?.toIntOrNull() ?: 9
         )
     }
 }

@@ -7,12 +7,7 @@
       - mongo1-data:/data/db
     networks:
       - crackhash-net
-    deploy:
-      placement:
-        constraints:
-          - node.hostname == node-1
-      restart_policy:
-        condition: on-failure
+    restart: on-failure
 
   mongo2:
     image: mongo:7.0
@@ -21,12 +16,7 @@
       - mongo2-data:/data/db
     networks:
       - crackhash-net
-    deploy:
-      placement:
-        constraints:
-          - node.hostname == node-2
-      restart_policy:
-        condition: on-failure
+    restart: on-failure
 
   mongo3:
     image: mongo:7.0
@@ -35,12 +25,7 @@
       - mongo3-data:/data/db
     networks:
       - crackhash-net
-    deploy:
-      placement:
-        constraints:
-          - node.hostname == node-3
-      restart_policy:
-        condition: on-failure
+    restart: on-failure
 
   mongo-init:
     image: mongo:7.0
@@ -59,13 +44,7 @@
         mongosh --host mongo1:27017 /mongo-init.js;
         echo 'Replica set initiated.';
       "
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: none
-      placement:
-        constraints:
-          - node.labels.hostname == node-1
+    restart: "no"
 
   #  ============================ RabbitMQ =========================
   rabbitmq:
@@ -75,12 +54,9 @@
       - rabbitmq-data:/var/lib/rabbitmq
     networks:
       - crackhash-net
-    deploy:
-      placement:
-        constraints:
-          - node.hostname == node-3
-      restart_policy:
-        condition: on-failure
+    ports:
+      - "15672"  # для доступа к панели управления
+    restart: on-failure
 
   #  ============================ Gateway =========================
   gateway:
@@ -100,13 +76,7 @@
       - mongo3
     networks:
       - crackhash-net
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-      placement:
-        constraints:
-          - node.hostname == node-3
+    restart: on-failure
 
   #  ============================ Worker =========================
   worker:
@@ -120,19 +90,13 @@
       - rabbitmq
     networks:
       - crackhash-net
-    deploy:
-      replicas: 3
-      placement:
-        max_replicas_per_node: 1
-        constraints:
-          - node.role == worker
-      restart_policy:
-        condition: on-failure
+    restart: on-failure
+    scale: 3
 
 #  ============================ Networks =========================
 networks:
   crackhash-net:
-    driver: overlay
+    driver: bridge
 
 #  ============================ Volumes =========================
 volumes:

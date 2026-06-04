@@ -11,3 +11,7 @@ build
 Dockerfile
 docker-compose.yml
 .dockerignore
+
+# Docker images
+gateway.tar
+worker.tar

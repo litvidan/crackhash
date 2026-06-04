@@ -1,15 +1,23 @@
 ﻿package com.litvidan.gateway
 
 import com.expediagroup.graphql.server.operations.Query
+import kotlinx.coroutines.runBlocking
 
 class StatusQuery : Query {
-    /**
-     * Fetches the status of a crack request.
-     * @return The current state of the request, or null if the requestId is not found.
-     */
-    fun hashStatus(requestId: String): CrackRequestState? {
-        // Simply return the value from the map.
-        // If the key doesn't exist, it will correctly return null.
-        return requestStates[requestId]
+    private val repository = TaskRepository()
+
+    fun hashStatus(requestId: String): CrackRequestState? = runBlocking {
+        val doc = repository.findByRequestId(requestId) ?: return@runBlocking null
+
+        val apiStatus = when (doc.status) {
+            TaskStatus.PENDING_QUEUE, TaskStatus.PENDING_WORKER -> RequestStatus.IN_PROGRESS
+            TaskStatus.COMPLETED -> RequestStatus.READY
+            TaskStatus.ERROR -> RequestStatus.ERROR
+        }
+
+        CrackRequestState(
+            status = apiStatus,
+            data = doc.foundWords.takeIf { it.isNotEmpty() }
+        )
     }
 }

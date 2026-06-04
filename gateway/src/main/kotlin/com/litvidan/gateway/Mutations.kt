@@ -1,116 +1,150 @@
 ﻿package com.litvidan.gateway
 
 import com.expediagroup.graphql.server.operations.Mutation
-import com.litvidan.grpc.HashCrackerServiceGrpcKt
-import com.litvidan.grpc.Service
-import io.grpc.ManagedChannel
-import io.grpc.ManagedChannelBuilder
+import com.litvidan.common.RabbitMqService
+import com.litvidan.common.ResultMessage
+import com.litvidan.common.TaskMessage
 import kotlinx.coroutines.*
 import java.math.BigInteger
 import java.util.*
-import java.util.concurrent.TimeUnit
 
 class CrackHashMutation : Mutation {
+    private val repository = TaskRepository()
+    private val rabbitMq = RabbitMqService(GatewayConfig.current.rabbitmqHost)
+    private val config = GatewayConfig.current
 
-    @OptIn(DelicateCoroutinesApi::class)
+    private val recoveryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    init {
+        rabbitMq.startResultConsumer { result -> handleWorkerResponse(result) }
+
+        // Восстановление PENDING_WORKER задач
+        recoveryScope.launch {
+            delay(5_000)
+            val pendingTasks = repository.findAllByStatus(TaskStatus.PENDING_WORKER)
+            pendingTasks.forEach { task -> resendMissingParts(task) }
+        }
+
+        // Фоновый процесс для PENDING_QUEUE задач
+        recoveryScope.launch {
+            while (isActive) {
+                delay(5_000)  // проверять раз в 5 секунд
+                try {
+                    processPendingQueueTasks()
+                } catch (e: Exception) {
+                    println("Error processing PENDING_QUEUE tasks: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private suspend fun processPendingQueueTasks() {
+        val pendingTasks = repository.findAllByStatus(TaskStatus.PENDING_QUEUE)
+        for (task in pendingTasks) {
+            // Пытаемся захватить задачу (атомарно сменить статус на PENDING_WORKER)
+            if (repository.tryClaimPendingQueueTask(task.requestId)) {
+                try {
+                    println("Resending PENDING_QUEUE task ${task.requestId}")
+                    publishTaskParts(task)
+                } catch (e: Exception) {
+                    // Если публикация не удалась, возвращаем статус обратно для повторной попытки
+                    println("Failed to resend task ${task.requestId}: ${e.message}")
+                    repository.updateStatus(task.requestId, TaskStatus.PENDING_QUEUE)
+                }
+            }
+        }
+    }
+
     fun crackHash(hash: String, maxLength: Int): String {
-        val config = GatewayConfig.current
+        // Проверка дубликата
+        val existing = runBlocking { repository.findByHashAndMaxLength(hash, maxLength) }
+        if (existing != null) {
+            println("Duplicate request for hash '$hash' with maxLength=$maxLength. Returning existing requestId: ${existing.requestId}")
+            return existing.requestId
+        }
+
         val requestId = UUID.randomUUID().toString()
         println("Received crack request for hash '$hash'. Assigned requestId: $requestId")
 
-        requestStates[requestId] = CrackRequestState(status = RequestStatus.IN_PROGRESS)
+        val taskDoc = TaskDocument(
+            requestId = requestId,
+            hash = hash,
+            maxLength = maxLength,
+            alphabet = config.alphabet,
+            totalParts = config.taskPartitionCount,
+            status = TaskStatus.PENDING_QUEUE
+        )
 
-        GlobalScope.launch {
-            handleCrackRequest(requestId, hash, maxLength, config)
+        runBlocking {
+            repository.save(taskDoc)
+            publishTaskParts(taskDoc)
+            repository.updateStatus(requestId, TaskStatus.PENDING_WORKER)
         }
 
         return requestId
     }
 
-    private suspend fun handleCrackRequest(
-        requestId: String,
-        hash: String,
-        maxLength: Int,
-        config: GatewayConfig.Config
-    ) {
-        try {
-            coroutineScope {
-                val totalCombinations = calculateTotalCombinations(maxLength, config.alphabet)
+    private suspend fun publishTaskParts(task: TaskDocument) {
+        val totalCombinations = calculateTotalCombinations(task.maxLength, task.alphabet)
+        val parts = splitIntoParts(totalCombinations, task.totalParts)
 
-                val tasks = config.workerHosts.mapIndexed { index, workerHost ->
-                    async {
-                        val (startIndex, rangeSize) = calculateWorkerRange(index, totalCombinations, config.workerCount)
-                        if (rangeSize <= BigInteger.ZERO) {
-                            return@async WorkerResult(WorkerResultType.SUCCESS)
-                        }
-                        processSingleWorker(requestId, workerHost, hash, config, maxLength, startIndex, rangeSize)
-                    }
-                }
-
-                val results = tasks.awaitAll()
-
-                // --- Final Status Logic ---
-                val foundWords = results.mapNotNull { it.foundWord.ifEmpty { null } }
-                val numTimeouts = results.count { it.type == WorkerResultType.TIMEOUT }
-                val numErrors = results.count { it.type == WorkerResultType.ERROR }
-
-                val finalStatus = when {
-                    foundWords.isNotEmpty() -> RequestStatus.READY
-                    numTimeouts == config.workerCount -> RequestStatus.TIMEOUT
-                    numErrors > 0 || numTimeouts > 0 -> RequestStatus.ERROR
-                    else -> RequestStatus.READY
-                }
-                
-                requestStates[requestId] = CrackRequestState(
-                    status = finalStatus,
-                    data = foundWords.ifEmpty { null }
-                )
-                println("Request $requestId finished with final status $finalStatus.")
-            }
-        } catch (e: Exception) {
-            println("Request $requestId failed with a critical gateway error: ${e.message}")
-            requestStates[requestId] = CrackRequestState(status = RequestStatus.ERROR)
+        parts.forEachIndexed { partId, (start, size) ->
+            val taskMessage = TaskMessage(
+                requestId = task.requestId,
+                partId = partId,
+                hash = task.hash,
+                alphabet = task.alphabet,
+                maxLength = task.maxLength,
+                startIndex = start.toLong(),
+                rangeSize = size.toLong()
+            )
+            rabbitMq.sendTask(taskMessage)
         }
+
+        println("Published ${parts.size} parts for request ${task.requestId}")
     }
 
-    private suspend fun processSingleWorker(
-        requestId: String,
-        workerHost: String,
-        hash: String,
-        config: GatewayConfig.Config,
-        maxLength: Int,
-        startIndex: BigInteger,
-        rangeSize: BigInteger
-    ): WorkerResult {
-        var channel: ManagedChannel? = null
-        return try {
-            withTimeout(config.requestTimeoutMillis) {
-                channel = ManagedChannelBuilder.forAddress(workerHost, config.workerPort).usePlaintext().build()
-                
-                val stub = HashCrackerServiceGrpcKt.HashCrackerServiceCoroutineStub(channel)
-                val request = buildWorkerRequest(hash, config.alphabet, maxLength, startIndex, rangeSize)
+    /**
+     * Re-send only the parts that haven't been processed yet (for crash recovery).
+     */
+    private suspend fun resendMissingParts(task: TaskDocument) {
+        if (task.status != TaskStatus.PENDING_WORKER) return
 
-                println("Dispatching task to $workerHost for requestId $requestId")
-                val response = stub.crack(request)
+        val processed = task.processedParts
+        val totalParts = task.totalParts
+        val missingPartIds = (0 until totalParts).filter { it !in processed }
+        if (missingPartIds.isEmpty()) {
+            // All parts already done – mark completed just in case
+            repository.updateStatus(task.requestId, TaskStatus.COMPLETED)
+            return
+        }
 
-                if (response.foundWord.isNotEmpty()) {
-                    println("Found word '${response.foundWord}' from $workerHost for request $requestId")
-                    requestStates.compute(requestId) { _, currentState ->
-                        val existingData = currentState?.data ?: emptyList()
-                        val newData = existingData + response.foundWord
-                        CrackRequestState(RequestStatus.PARTIAL, newData)
-                    }
-                }
-                WorkerResult(WorkerResultType.SUCCESS, response.foundWord)
-            }
-        } catch (e: TimeoutCancellationException) {
-            println("Worker $workerHost timed out: ${e.message}")
-            WorkerResult(WorkerResultType.TIMEOUT)
-        } catch (e: Exception) {
-            println("Error processing worker $workerHost: ${e.message}")
-            WorkerResult(WorkerResultType.ERROR)
-        } finally {
-            channel?.shutdown()?.awaitTermination(5, TimeUnit.SECONDS)
+        val totalCombinations = calculateTotalCombinations(task.maxLength, task.alphabet)
+        val allParts = splitIntoParts(totalCombinations, totalParts)
+
+        missingPartIds.forEach { partId ->
+            val (start, size) = allParts[partId]
+            val taskMessage = TaskMessage(
+                requestId = task.requestId,
+                partId = partId,
+                hash = task.hash,
+                alphabet = task.alphabet,
+                maxLength = task.maxLength,
+                startIndex = start.toLong(),
+                rangeSize = size.toLong()
+            )
+            rabbitMq.sendTask(taskMessage)
+        }
+        println("Recovery: re-published ${missingPartIds.size} missing parts for request ${task.requestId}")
+    }
+
+    private suspend fun handleWorkerResponse(result: ResultMessage) {
+        val processed = repository.tryProcessPart(result.requestId, result.partId, result.foundWord)
+        if (result.foundWord.isNotEmpty()) {
+            println("Received result for ${result.requestId} part ${result.partId}: ${result.foundWord}")
+        }
+        if (!processed) {
+            println("Ignored duplicate response for ${result.requestId} part ${result.partId}")
         }
     }
 
@@ -121,34 +155,12 @@ class CrackHashMutation : Mutation {
         }
     }
 
-    private fun calculateWorkerRange(
-        workerIndex: Int,
-        totalCombinations: BigInteger,
-        workerCount: Int
-    ): Pair<BigInteger, BigInteger> {
-        val rangePerWorker = totalCombinations / workerCount.toBigInteger()
-        val startIndex = workerIndex.toBigInteger() * rangePerWorker
-        val rangeSize = if (workerIndex == workerCount - 1) {
-            totalCombinations - startIndex
-        } else {
-            rangePerWorker
+    private fun splitIntoParts(total: BigInteger, partsCount: Int): List<Pair<BigInteger, BigInteger>> {
+        val rangePerWorker = total / partsCount.toBigInteger()
+        return (0 until partsCount).map { i ->
+            val start = i.toBigInteger() * rangePerWorker
+            val size = if (i == partsCount - 1) total - start else rangePerWorker
+            Pair(start, size)
         }
-        return Pair(startIndex, rangeSize)
-    }
-
-    private fun buildWorkerRequest(
-        hash: String,
-        alphabet: String,
-        maxLength: Int,
-        startIndex: BigInteger,
-        rangeSize: BigInteger
-    ): Service.CrackRequest {
-        return Service.CrackRequest.newBuilder()
-            .setTargetHash(hash)
-            .setAlphabet(alphabet)
-            .setMaxLength(maxLength)
-            .setStartIndex(startIndex.toLong())
-            .setRangeSize(rangeSize.toLong())
-            .build()
     }
 }

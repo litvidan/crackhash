@@ -1,84 +1,47 @@
 package com.litvidan.worker
 
-import com.litvidan.grpc.Service
-import com.litvidan.grpc.HashCrackerServiceGrpcKt
-import io.grpc.ServerBuilder
-import kotlinx.coroutines.yield
+import com.litvidan.common.RabbitMqService
+import com.litvidan.common.ResultMessage
+import kotlinx.coroutines.runBlocking
 import java.math.BigInteger
-import java.security.MessageDigest
-
-class HashCrackerService : HashCrackerServiceGrpcKt.HashCrackerServiceCoroutineImplBase() {
-
-    override suspend fun crack(request: Service.CrackRequest): Service.CrackResponse {
-        println("Received crack request for hash: ${request.targetHash}")
-        println("Range: from ${request.startIndex} to ${request.startIndex + request.rangeSize}")
-
-        val alphabet = request.alphabet
-        val targetHash = request.targetHash
-        val startIndex = BigInteger.valueOf(request.startIndex)
-        val rangeSize = BigInteger.valueOf(request.rangeSize)
-
-        var i = BigInteger.ZERO
-        while (i < rangeSize) {
-            // Check if the coroutine has been canceled by the gateway
-            yield()
-
-            val globalIndex = startIndex + i
-            val word = indexToWord(globalIndex, alphabet)
-            val hash = md5(word)
-            if (hash == targetHash) {
-                println("Hash found! Word: '$word' for index $globalIndex")
-                return Service.CrackResponse.newBuilder().setFoundWord(word).build()
-            }
-            i = i.add(BigInteger.ONE)
-        }
-
-        println("Hash not found in the assigned range.")
-        return Service.CrackResponse.newBuilder().setFoundWord("").build()
-    }
-}
-
-internal fun indexToWord(index: BigInteger, alphabet: String): String {
-    val base = BigInteger.valueOf(alphabet.length.toLong())
-    val builder = StringBuilder()
-
-    if (index == BigInteger.ZERO) {
-        return alphabet[0].toString()
-    }
-    
-    var totalForShorterWords = BigInteger.ZERO
-    var len = 1
-    while (true) {
-        val combinationsForLen = base.pow(len)
-        if (index < totalForShorterWords + combinationsForLen) {
-            var indexInLen = index - totalForShorterWords
-            for (i in 0 until len) {
-                val remainder = indexInLen % base
-                builder.insert(0, alphabet[remainder.toInt()])
-                indexInLen /= base
-            }
-            while (builder.length < len) {
-                builder.insert(0, alphabet[0])
-            }
-            return builder.toString()
-        }
-        totalForShorterWords += combinationsForLen
-        len++
-    }
-}
-
-internal fun md5(input: String): String {
-    val md = MessageDigest.getInstance("MD5")
-    val digest = md.digest(input.toByteArray())
-    return BigInteger(1, digest).toString(16).padStart(32, '0')
-}
-
 
 fun main() {
-    val server = ServerBuilder.forPort(50051)
-        .addService(HashCrackerService())
-        .build()
-    println("Worker started on port 50051...")
-    server.start()
-    server.awaitTermination()
+    val config = WorkerConfig.current
+    val rabbitMq = RabbitMqService(config.rabbitmqHost)
+    val cracker = HashCracker(config.alphabet)
+
+    println("Worker started. Listening for tasks on RabbitMQ...")
+
+    // Subscribe to the task queue with manual confirmation
+    rabbitMq.startTaskConsumer { task, deliveryTag ->
+        println("Received task: requestId=${task.requestId}, range=[${task.startIndex}, ${task.startIndex + task.rangeSize})")
+
+        val foundWord = cracker.crack(
+            targetHash = task.hash,
+            maxLength = task.maxLength,
+            startIndex = BigInteger.valueOf(task.startIndex),
+            rangeSize = BigInteger.valueOf(task.rangeSize)
+        )
+
+        // Sending the result back to the response queue
+        rabbitMq.sendResult(ResultMessage(task.requestId, task.partId, foundWord))
+
+        if (foundWord.isNotEmpty()) {
+            println("Found word '$foundWord' for request ${task.requestId}")
+        } else {
+            println("No match in assigned range for request ${task.requestId}")
+        }
+        // Acknowledgement is sent automatically inside the startTaskConsumer upon success
+    }
+
+    // Blocking the main thread to prevent the app to terminate
+    Runtime.getRuntime().addShutdownHook(Thread {
+        runBlocking {
+            rabbitMq.close()
+        }
+    })
+
+    while (true) {
+        Thread.sleep(1000)
+    }
 }
